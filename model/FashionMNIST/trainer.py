@@ -1,16 +1,30 @@
+import sys
+import os
+
+# Get the absolute path of the current script's directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# modle/FashionMNIST => ./
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+print(f"parent_dir1: {parent_dir}")
+
 import torch
+from tqdm import tqdm
 
 from datetime import datetime
-from dataset import training_loader, validation_loader
-from model import GarmentClassifier
+from FashionMNIST.dataset import training_loader, validation_loader
+from FashionMNIST.model import GarmentClassifier
+from utils.config import Config
+from utils.utils import get_device
 from torch.utils.tensorboard import SummaryWriter
 
-model = GarmentClassifier()
-optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-loss_fn = torch.nn.CrossEntropyLoss()
 
-
-def train_one_epoch(epoch_index: int, tb_writer: SummaryWriter):
+def train_one_epoch(
+    config: Config,
+    epoch_index: int,
+    optimizer: torch.optim.Optimizer,
+    tb_writer: SummaryWriter,
+):
     running_loss = 0.0
     last_loss = 0.0
 
@@ -20,6 +34,8 @@ def train_one_epoch(epoch_index: int, tb_writer: SummaryWriter):
     for i, data in enumerate(training_loader):
         # Every data instance is an input + label pair
         inputs, labels = data
+        inputs = inputs.to(config.device)
+        labels = labels.to(config.device)
 
         # Zero your gradients for every batch!
         optimizer.zero_grad()
@@ -46,51 +62,66 @@ def train_one_epoch(epoch_index: int, tb_writer: SummaryWriter):
     return last_loss
 
 
-# Initializing in a separate cell so we can easily add more epochs to the same run
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-writer = SummaryWriter("runs/fashion_trainer_{}".format(timestamp))
-epoch_number = 0
+def train(
+    config: Config, model: torch.nn.Module, optimizer: torch.optim.Optimizer, loss_fn
+):
+    # Initializing in a separate cell so we can easily add more epochs to the same run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    writer = SummaryWriter("runs/fashion_trainer_{}".format(timestamp))
+    epoch_number = 0
+    best_vloss = 1_000_000.0
 
-EPOCHS = 5
+    for epoch in tqdm(range(config.epochs)):
+        print("EPOCH {}:".format(epoch_number + 1))
 
-best_vloss = 1_000_000.0
+        # Make sure gradient tracking is on, and do a pass over the data
+        model.train(True)
+        avg_loss = train_one_epoch(
+            config=config,
+            epoch_index=epoch_number,
+            optimizer=optimizer,
+            tb_writer=writer,
+        )
 
-for epoch in range(EPOCHS):
-    print("EPOCH {}:".format(epoch_number + 1))
+        running_vloss = 0.0
+        # Set the model to evaluation mode, disabling dropout and using population
+        # statistics for batch normalization.
+        model.eval()
 
-    # Make sure gradient tracking is on, and do a pass over the data
-    model.train(True)
-    avg_loss = train_one_epoch(epoch_number, writer)
+        # Disable gradient computation and reduce memory consumption.
+        with torch.no_grad():
+            for i, vdata in enumerate(validation_loader):
+                vinputs, vlabels = vdata
+                vinputs = vinputs.to(config.device)
+                vlabels = vlabels.to(config.device)
+                voutputs = model(vinputs)
+                vloss = loss_fn(voutputs, vlabels)
+                running_vloss += vloss
 
-    running_vloss = 0.0
-    # Set the model to evaluation mode, disabling dropout and using population
-    # statistics for batch normalization.
-    model.eval()
+        avg_vloss = running_vloss / (epoch + 1)
+        print(f"Epoch: {epoch}, LOSS: train {avg_loss} valid {avg_vloss}")
 
-    # Disable gradient computation and reduce memory consumption.
-    with torch.no_grad():
-        for i, vdata in enumerate(validation_loader):
-            vinputs, vlabels = vdata
-            voutputs = model(vinputs)
-            vloss = loss_fn(voutputs, vlabels)
-            running_vloss += vloss
+        # Log the running loss averaged per batch
+        # for both training and validation
+        writer.add_scalars(
+            "Training vs. Validation Loss",
+            {"Training": avg_loss, "Validation": avg_vloss},
+            epoch_number + 1,
+        )
+        writer.flush()
 
-    avg_vloss = running_vloss / (epoch + 1)
-    print(f"Epoch: {epoch}, LOSS: train {avg_loss} valid {avg_vloss}")
+        # Track best performance, and save the model's state
+        if avg_vloss < best_vloss:
+            best_vloss = avg_vloss
+            model_path = "model_{}_{}.pt".format(timestamp, epoch_number)
+            torch.save(model.state_dict(), model_path)
 
-    # Log the running loss averaged per batch
-    # for both training and validation
-    writer.add_scalars(
-        "Training vs. Validation Loss",
-        {"Training": avg_loss, "Validation": avg_vloss},
-        epoch_number + 1,
-    )
-    writer.flush()
+        epoch_number += 1
 
-    # Track best performance, and save the model's state
-    if avg_vloss < best_vloss:
-        best_vloss = avg_vloss
-        model_path = "model_{}_{}.pt".format(timestamp, epoch_number)
-        torch.save(model.state_dict(), model_path)
 
-    epoch_number += 1
+config = Config(device=get_device(), epochs=5)
+model = GarmentClassifier().to(config.device)
+optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum)
+loss_fn = torch.nn.CrossEntropyLoss()
+
+train(config, model, optimizer, loss_fn)

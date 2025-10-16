@@ -1,2 +1,2 @@
-# ray_learning
+# Ray Learning
 Learning the Ray ML solution
