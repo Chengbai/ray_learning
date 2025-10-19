@@ -23,6 +23,7 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+prometheus-3.7.1.darwin-arm64/
 *.egg-info/
 .installed.cfg
 *.egg

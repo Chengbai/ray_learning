@@ -1,26 +1,20 @@
-import sys
-import os
-
-# Get the absolute path of the current script's directory
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# modle/FashionMNIST => ./
-parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
-print(f"parent_dir1: {parent_dir}")
-
+import ray
 import torch
+
 from tqdm import tqdm
 
 from datetime import datetime
-from FashionMNIST.dataset import training_loader, validation_loader
-from FashionMNIST.model import GarmentClassifier
-from utils.config import Config
-from utils.utils import get_device
+from model.FashionMNIST.dataset import get_dataloaders
+from model.FashionMNIST.model import GarmentClassifier
+from model.utils.config import Config
+from torch.utils.data import DataLoader
+from model.utils.utils import get_device
 from torch.utils.tensorboard import SummaryWriter
 
 
 def train_one_epoch(
     config: Config,
+    training_loader: DataLoader,
     epoch_index: int,
     optimizer: torch.optim.Optimizer,
     tb_writer: SummaryWriter,
@@ -62,15 +56,18 @@ def train_one_epoch(
     return last_loss
 
 
+@ray.remote
 def train(
     config: Config, model: torch.nn.Module, optimizer: torch.optim.Optimizer, loss_fn
-):
+) -> str:
     # Initializing in a separate cell so we can easily add more epochs to the same run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     writer = SummaryWriter("runs/fashion_trainer_{}".format(timestamp))
     epoch_number = 0
     best_vloss = 1_000_000.0
+    model_path = "dummy model"
 
+    training_loader, validation_loader = get_dataloaders()
     for epoch in tqdm(range(config.epochs)):
         print("EPOCH {}:".format(epoch_number + 1))
 
@@ -78,6 +75,7 @@ def train(
         model.train(True)
         avg_loss = train_one_epoch(
             config=config,
+            training_loader=training_loader,
             epoch_index=epoch_number,
             optimizer=optimizer,
             tb_writer=writer,
@@ -118,10 +116,14 @@ def train(
 
         epoch_number += 1
 
+    return model_path
+
 
 config = Config(device=get_device(), epochs=5)
 model = GarmentClassifier().to(config.device)
 optimizer = torch.optim.SGD(model.parameters(), lr=config.lr, momentum=config.momentum)
 loss_fn = torch.nn.CrossEntropyLoss()
 
-train(config, model, optimizer, loss_fn)
+train_ref = train.remote(config, model, optimizer, loss_fn)
+model_path = ray.get(train_ref)
+print(f"Final model path: {model_path}")
